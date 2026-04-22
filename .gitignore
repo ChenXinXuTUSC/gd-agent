@@ -1,0 +1,8 @@
+.env
+/build
+/bin
+
+
+*.out
+*.bin
+*.exe
