@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"gd-agent/pkg/llms"
+	"gd-agent/pkg/ui"
 	llm_types"gd-agent/pkg/llms/types"
 )
 
@@ -13,7 +14,8 @@ func main() {
 	for {
 		userInput := ""
 		systemOutput := []rune{}
-		fmt.Print("user: ")
+		fmt.Println(ui.UserLabel.Render("user") )
+		fmt.Print("> ")
 		fmt.Scanln(&userInput)
 	
 		state.Messages = append(state.Messages, llm_types.Message{
@@ -26,14 +28,15 @@ func main() {
 			panic(err)
 		}
 	
-		fmt.Print("system: ")
+		fmt.Println(ui.AssistantLabel.Render("assistant"))
 		for r := range runeCh {
 			systemOutput = append(systemOutput, r)
 			fmt.Print(string(r))
 		}
+		fmt.Println()
 
 		state.Messages = append(state.Messages, llm_types.Message{
-			Role: "system",
+			Role: "assistant",
 			Content: string(systemOutput),
 		})
 	}
