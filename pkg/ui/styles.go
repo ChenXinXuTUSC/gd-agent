@@ -3,24 +3,21 @@ package ui
 import "charm.land/lipgloss/v2"
 
 var (
-	ChatWindow = lipgloss.NewStyle().
-			Width(100).
-			Height(50)
+	userLabelStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("12"))
 
-	InputBox = lipgloss.NewStyle().
-			Width(100).
-			Height(5)
+	assistantLabelStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("10"))
 
-	UserLabel = lipgloss.NewStyle().
-			Background(lipgloss.Color("2")).
-			Foreground(lipgloss.Color("10")).
+	viewportStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("240")).
 			Padding(0, 1)
 
-	AssistantLabel = lipgloss.NewStyle().
-			Background(lipgloss.Color("4")).
-			Foreground(lipgloss.Color("12")).
+	inputboxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("99")).
 			Padding(0, 1)
-
-	MessageBubble = lipgloss.NewStyle().
-			BorderStyle(lipgloss.RoundedBorder())
 )
