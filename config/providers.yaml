@@ -1,4 +1,4 @@
-DeepSeek:
+deepseek:
   base_url: https://api.deepseek.com/v1
   api_key: DEEPSEEK_API_KEY
   model_list: [
@@ -7,7 +7,7 @@ DeepSeek:
   ]
   default_model: deepseek-chat
 
-MiniMax:
+minimax:
   base_url: https://api.minimax.chat/v1
   api_key: MINIMAX_API_KEY
   model_list: [
@@ -16,7 +16,7 @@ MiniMax:
   ]
   default_model: MiniMax-M2.5
 
-MoonShot:
+moonshot:
   base_url: https://api.moonshot.cn/v1
   api_key: MOONSHOT_API_KEY
   model_list: [
@@ -27,7 +27,7 @@ MoonShot:
   ]
   default_model: kimi-k2.5
 
-ZhiPu:
+zhipu:
   base_url: https://open.bigmodel.cn/api/paas/v4
   api_key: ZHIPU_API_KEY
   model_list: [

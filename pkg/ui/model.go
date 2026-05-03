@@ -2,39 +2,45 @@ package ui
 
 import (
 	"fmt"
-	"gd-agent/pkg/llms"
-	llm_types "gd-agent/pkg/llms/types"
 	"strings"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"gd-agent/pkg/llms"
+	"gd-agent/pkg/provider"
 )
 
 const (
-	viewportHeight = 20
+	viewportHeight = 7
 	viewportWidth  = 20
-	inputBoxHeight = 5
+	inputBoxHeight = 3
 	inputBoxWidth  = 10
 )
 
 type ChatBox struct {
+	state    llms.State        // 核心属性状态
+	provider provider.Provider // 大模型服务提供商
+
+	// 以下为 CLI 界面相关状态与数据
 	viewport viewport.Model
 	inputbox textarea.Model
 
-	state llm_types.State
+	messages  []ChatMsg // 对话及渲染结果
+	streaming []rune    // 正在流式接收模型输出的字符缓冲
 
-	transcript []llm_types.Message // 渲染好的对话
-	streaming  []rune              // 正在流式接收模型输出的字符缓冲
-
-	isStreaming bool
-
-	provider      llms.Provider
+	isStreaming   bool
 	currentRuneCh <-chan rune // 流式传输的只读接受通道
 }
 
-func NewChatBox(provider llms.Provider) *ChatBox {
+type ChatMsg struct {
+	raw      *llms.Message
+	rendered string
+}
+
+func NewChatBox(provider provider.Provider) *ChatBox {
 	// 用户消息输入框
 	ta := textarea.New()
 	ta.Placeholder = "press enter to send any message, Shift+Enter to put a new line"
@@ -52,7 +58,7 @@ func NewChatBox(provider llms.Provider) *ChatBox {
 	return &ChatBox{
 		viewport: vp,
 		inputbox: ta,
-		state:    llm_types.State{Stream: true},
+		state:    llms.State{Stream: true},
 		provider: provider,
 	}
 }
@@ -90,6 +96,14 @@ func (m *ChatBox) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.inputbox.Reset()
 			cmds = append(cmds, m.sendMessage(userText))
+			m.refreshViewport()
+
+		case "shift+enter":
+			// 输入换行
+			if !m.isStreaming {
+				current := m.inputbox.Value()
+				m.inputbox.SetValue(current + "\n")
+			}
 
 		default:
 			if !m.isStreaming {
@@ -101,20 +115,25 @@ func (m *ChatBox) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamRuneMsg:
 		m.streaming = append(m.streaming, rune(msg))
+		if m.isStreaming && len(m.streaming) > 0 {
+			lastMsg := &llms.Message{
+				Role:    "assistant",
+				Content: string(m.streaming),
+			}
+			m.messages[len(m.messages) - 1].rendered = m.renderBubble(lastMsg, m.viewport.Width())
+		}
 		m.refreshViewport()
 		cmds = append(cmds, m.waitNextRune())
 
 	case streamDoneMsg:
 		content := string(m.streaming)
-		m.state.Messages = append(m.state.Messages, llm_types.Message{
+		lastMsg := &llms.Message{
 			Role:    "assistant",
 			Content: content,
-		})
-		// 将流式输出消息片段固化到 transcript
-		m.transcript = append(m.transcript, llm_types.Message{
-			Role:    "assistant",
-			Content: content,
-		})
+		}
+		m.state.Messages = append(m.state.Messages, lastMsg)
+		// 将流式输出消息片段固化到消息列表
+		m.messages[len(m.messages) - 1].raw = lastMsg
 
 		m.streaming = nil     // 清空流式输出接收区
 		m.currentRuneCh = nil // 空引用回收管道
@@ -123,9 +142,13 @@ func (m *ChatBox) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamErrMsg:
 		m.isStreaming = false
-		m.transcript = append(m.transcript, llm_types.Message{
+		errMsg := &llms.Message{
 			Role:    "system",
 			Content: fmt.Sprintf("error: %v", msg.err.Error()),
+		}
+		m.messages = append(m.messages, ChatMsg{
+			raw: errMsg,
+			rendered: m.renderBubble(errMsg, m.viewport.Width()),
 		})
 		m.refreshViewport()
 	}
@@ -154,16 +177,24 @@ func (m *ChatBox) View() tea.View {
 
 func (m *ChatBox) sendMessage(text string) tea.Cmd {
 	m.isStreaming = true
-	m.state.Messages = append(m.state.Messages, llm_types.Message{
+	msg := &llms.Message{
 		Role:    "user",
 		Content: text,
-	})
+	}
+	m.state.Messages = append(m.state.Messages, msg)
 	// 展示区消息追加
-	m.transcript = append(m.transcript, llm_types.Message{
-		Role:    "user",
-		Content: text,
+	m.messages = append(m.messages, ChatMsg{
+		raw: msg,
+		rendered: m.renderBubble(msg, m.viewport.Width()),
 	})
-	m.refreshViewport()
+	
+	// 展示区的正在接受流式传输响应的消息占位符
+	m.messages = append(m.messages, ChatMsg{
+		raw: &llms.Message{
+			Role: "assistant",
+			Content: "",
+		},
+	})
 
 	// 返回 CMD 调用 LLM ，拿到流失传输 channel，触发第一次读取
 	return func() tea.Msg {
@@ -187,31 +218,23 @@ func (m *ChatBox) waitNextRune() tea.Cmd {
 }
 
 func (m *ChatBox) refreshViewport() {
-	w := m.viewport.Width()
 	var lines []string
 
-	for _, msg := range m.transcript {
-		lines = append(lines, m.renderBubble(msg, w))
-	}
-	// 还有一条额外正在流式传输接收的消息
-	if len(m.streaming) > 0 {
-		lines = append(lines, m.renderBubble(llm_types.Message{
-			Role: "assistant",
-			Content: string(m.streaming),
-		}, w))
+	for _, msg := range m.messages {
+		lines = append(lines, msg.rendered)
 	}
 
 	m.viewport.SetContent(strings.Join(lines, "\n"))
 	m.viewport.GotoBottom()
 }
 
-func (m *ChatBox) renderBubble(msg llm_types.Message, containerWidth int) string {
+func (m *ChatBox) renderBubble(msg *llms.Message, containerWidth int) string {
 	// 这里先渲染气泡的内容，然后在 View 中统一放到满宽组件中进行左右对齐
 	output := ""
 
 	// 先纯文本换行（无边框），再包气泡边框
-	bubbleMaxW := containerWidth - 6                // 气泡 + 标签占用的总宽度上限
-	contentMaxW := bubbleMaxW - 4                   // 扣除边框(2) + padding(2) = 内容文本宽度
+	bubbleMaxW := containerWidth - 2 // 气泡 + 标签占用的总宽度上限
+	contentMaxW := bubbleMaxW - 2    // 扣除边框(2) + padding(2) = 内容文本宽度
 	wrapStyle := lipgloss.NewStyle().Width(min(contentMaxW, lipgloss.Width(msg.Content)))
 
 	if msg.Role == "user" {
@@ -219,7 +242,7 @@ func (m *ChatBox) renderBubble(msg llm_types.Message, containerWidth int) string
 		wrapped := wrapStyle.Render(msg.Content)
 		bubble := userBubbleStyle.Render(wrapped)
 		block := lipgloss.JoinVertical(lipgloss.Right, label, bubble)
-		output = lipgloss.NewStyle().Width(containerWidth - 2).Align(lipgloss.Right).Render(block)
+		output = lipgloss.NewStyle().Width(containerWidth).Align(lipgloss.Right).Render(block)
 	}
 
 	if msg.Role == "assistant" {
@@ -227,11 +250,11 @@ func (m *ChatBox) renderBubble(msg llm_types.Message, containerWidth int) string
 		wrapped := wrapStyle.Render(msg.Content)
 		bubble := assistantBubbleStyle.Render(wrapped)
 		block := lipgloss.JoinVertical(lipgloss.Left, label, bubble)
-		output = lipgloss.NewStyle().Width(containerWidth - 2).Align(lipgloss.Left).Render(block)
+		output = lipgloss.NewStyle().Width(containerWidth).Align(lipgloss.Left).Render(block)
 	}
 
 	if msg.Role == "system" {
-		output = systemBubbleStyle.Width(containerWidth - 6).Render(msg.Content)
+		output = systemBubbleStyle.Width(containerWidth).Render(msg.Content)
 	}
 
 	return output

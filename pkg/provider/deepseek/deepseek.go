@@ -9,7 +9,8 @@ import (
 	"strings"
 
 	. "gd-agent/pkg/common"
-	llm_types "gd-agent/pkg/llms/types"
+	"gd-agent/pkg/llms"
+	"gd-agent/pkg/provider"
 
 	"io"
 	"net/http"
@@ -17,14 +18,14 @@ import (
 )
 
 type ProviderDeepSeek struct {
-	Info llm_types.ProviderInfo
+	Info provider.ProviderInfo
 }
 
 // DeepSeek 相关请求与响应格式定义
 type ChatReq struct {
-	Model    string              `json:"model"`
-	Messages []llm_types.Message `json:"messages"`
-	Stream   bool                `json:"stream"`
+	Model    string          `json:"model"`
+	Messages []*llms.Message `json:"messages"`
+	Stream   bool            `json:"stream"`
 }
 
 // 非流式响应
@@ -38,10 +39,10 @@ type ChatResp struct {
 	SystemFingerprint string   `json:"system_fingerprint"`
 }
 type Choice struct {
-	Index        int               `json:"index"`
-	Message      llm_types.Message `json:"message"`
-	Logprobs     interface{}       `json:"logprobs"`
-	FinishReason string            `json:"finish_reason"`
+	Index        int          `json:"index"`
+	Message      llms.Message `json:"message"`
+	Logprobs     interface{}  `json:"logprobs"`
+	FinishReason string       `json:"finish_reason"`
 }
 type Usage struct {
 	PromptTokens          int                 `json:"prompt_tokens"`
@@ -75,8 +76,22 @@ type Delta struct {
 	Content string `json:"content"`
 }
 
-func (p ProviderDeepSeek) GetResponse(state *llm_types.State) (<-chan rune, error) {
-	resp, err := p.doHttpRequest(state.Messages, state.Stream)
+func init() {
+	provider.Register("deepseek", func(info provider.ProviderInfo) provider.Provider {
+		return ProviderDeepSeek{Info: info}
+	})
+}
+
+func (p ProviderDeepSeek) GetResponse(state *llms.State) (<-chan rune, error) {
+	httpReqBody, err := json.Marshal(ChatReq{
+		Model:    p.Info.DefaultModel,
+		Messages: state.Messages,
+		Stream:   state.Stream,
+	})
+	if err != nil {
+		return nil, WrapErr(err)
+	}
+	resp, err := p.doHttpRequest(httpReqBody)
 	if err != nil {
 		return nil, WrapErr(err)
 	}
@@ -92,16 +107,7 @@ func (p ProviderDeepSeek) GetResponse(state *llm_types.State) (<-chan rune, erro
 	return runeCh, respErr
 }
 
-func (p ProviderDeepSeek) doHttpRequest(reqMsgs []llm_types.Message, streamMode bool) (*http.Response, error) {
-	reqBody, err := json.Marshal(ChatReq{
-		Model:    p.Info.DefaultModel,
-		Messages: reqMsgs,
-		Stream:   streamMode,
-	})
-	if err != nil {
-		return nil, WrapErr(err)
-	}
-
+func (p ProviderDeepSeek) doHttpRequest(httpReqBody []byte) (*http.Response, error) {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout: 10 * time.Second, // 仅控制 TCP 连接超时
@@ -109,7 +115,7 @@ func (p ProviderDeepSeek) doHttpRequest(reqMsgs []llm_types.Message, streamMode 
 		ResponseHeaderTimeout: 15 * time.Second, // 仅控制等待响应头超时
 	}
 
-	req, err := http.NewRequest("POST", p.Info.BaseUrl+"/chat/completions", bytes.NewReader(reqBody))
+	req, err := http.NewRequest("POST", p.Info.BaseUrl+"/chat/completions", bytes.NewReader(httpReqBody))
 	if err != nil {
 		return nil, WrapErr(err)
 	}
