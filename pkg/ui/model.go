@@ -2,19 +2,23 @@ package ui
 
 import (
 	"fmt"
+	// "os"
 	"strings"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
+	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"gd-agent/pkg/llms"
 	"gd-agent/pkg/provider"
 )
 
 const (
-	viewportHeight = 7
+	viewportHeight = 20
 	viewportWidth  = 20
 	inputBoxHeight = 3
 	inputBoxWidth  = 10
@@ -55,6 +59,12 @@ func NewChatBox(provider provider.Provider) *ChatBox {
 	vp.SetHeight(viewportHeight)
 	vp.SetContent("welcome to use chatbox")
 
+	// r, err := glamour.NewTermRenderer(glamour.WithStylePath("dark"))
+	// if err != nil {
+	// 	fmt.Fprintf(os.Stderr, "create chatbox error: %v", err)
+	// 	return nil
+	// }
+
 	return &ChatBox{
 		viewport: vp,
 		inputbox: ta,
@@ -77,9 +87,9 @@ func (m *ChatBox) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.viewport.SetWidth(msg.Width - 4)
-		m.inputbox.SetWidth(msg.Width - 4)
-		viewportStyle.Width(msg.Width - 2)
-		inputboxStyle.Width(msg.Width - 2)
+		m.inputbox.SetWidth(msg.Width - 2)
+		viewBorder = viewBorder.Width(msg.Width)
+		inputBorder = inputBorder.Width(msg.Width)
 
 	case tea.KeyPressMsg:
 		switch msg.String() {
@@ -120,20 +130,24 @@ func (m *ChatBox) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Role:    "assistant",
 				Content: string(m.streaming),
 			}
-			m.messages[len(m.messages) - 1].rendered = m.renderBubble(lastMsg, m.viewport.Width())
+			m.messages[len(m.messages)-1].rendered = m.renderBubble(lastMsg, m.viewport.Width(), false)
 		}
 		m.refreshViewport()
 		cmds = append(cmds, m.waitNextRune())
 
 	case streamDoneMsg:
-		content := string(m.streaming)
+		content := strings.TrimSpace(string(m.streaming))
 		lastMsg := &llms.Message{
 			Role:    "assistant",
 			Content: content,
 		}
 		m.state.Messages = append(m.state.Messages, lastMsg)
 		// 将流式输出消息片段固化到消息列表
-		m.messages[len(m.messages) - 1].raw = lastMsg
+		// 流式传输完成的时候换成 markdown 渲染
+		m.messages[len(m.messages)-1] = ChatMsg{
+			raw:      lastMsg,
+			rendered: m.renderBubble(lastMsg, m.viewport.Width(), true),
+		}
 
 		m.streaming = nil     // 清空流式输出接收区
 		m.currentRuneCh = nil // 空引用回收管道
@@ -147,8 +161,8 @@ func (m *ChatBox) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Content: fmt.Sprintf("error: %v", msg.err.Error()),
 		}
 		m.messages = append(m.messages, ChatMsg{
-			raw: errMsg,
-			rendered: m.renderBubble(errMsg, m.viewport.Width()),
+			raw:      errMsg,
+			rendered: m.renderBubble(errMsg, m.viewport.Width(), false),
 		})
 		m.refreshViewport()
 	}
@@ -161,8 +175,8 @@ func (m *ChatBox) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // --- view ---
 func (m *ChatBox) View() tea.View {
-	vp := viewportStyle.Render(m.viewport.View())
-	in := inputboxStyle.Render(m.inputbox.View())
+	vp := viewBorder.Render(m.viewport.View())
+	in := inputBorder.Render(m.inputbox.View())
 	hint := "ctrl+c to quit"
 	if m.isStreaming {
 		hint = "⏳ generating response..."
@@ -177,6 +191,7 @@ func (m *ChatBox) View() tea.View {
 
 func (m *ChatBox) sendMessage(text string) tea.Cmd {
 	m.isStreaming = true
+	text = strings.TrimSpace(text)
 	msg := &llms.Message{
 		Role:    "user",
 		Content: text,
@@ -184,14 +199,14 @@ func (m *ChatBox) sendMessage(text string) tea.Cmd {
 	m.state.Messages = append(m.state.Messages, msg)
 	// 展示区消息追加
 	m.messages = append(m.messages, ChatMsg{
-		raw: msg,
-		rendered: m.renderBubble(msg, m.viewport.Width()),
+		raw:      msg,
+		rendered: m.renderBubble(msg, m.viewport.Width(), true),
 	})
-	
+
 	// 展示区的正在接受流式传输响应的消息占位符
 	m.messages = append(m.messages, ChatMsg{
 		raw: &llms.Message{
-			Role: "assistant",
+			Role:    "assistant",
 			Content: "",
 		},
 	})
@@ -228,34 +243,116 @@ func (m *ChatBox) refreshViewport() {
 	m.viewport.GotoBottom()
 }
 
-func (m *ChatBox) renderBubble(msg *llms.Message, containerWidth int) string {
-	// 这里先渲染气泡的内容，然后在 View 中统一放到满宽组件中进行左右对齐
-	output := ""
+// 抽出自定义渲染器构造函数
+func newCustomRenderer(wordWrap int) (*glamour.TermRenderer, error) {
+	style := styles.DarkStyleConfig
 
-	// 先纯文本换行（无边框），再包气泡边框
-	bubbleMaxW := containerWidth - 2 // 气泡 + 标签占用的总宽度上限
-	contentMaxW := bubbleMaxW - 2    // 扣除边框(2) + padding(2) = 内容文本宽度
-	wrapStyle := lipgloss.NewStyle().Width(min(contentMaxW, lipgloss.Width(msg.Content)))
+	// 取消默认终端 markdown 渲染的前后左右间距，这里我们是消息气泡渲染
+	zero := uint(0)
+	empty := ""
+	style.Document.Margin = &zero
+	style.Document.BlockPrefix = empty
+	style.Document.BlockSuffix = empty
 
-	if msg.Role == "user" {
+	// 其他 markdown 样式支持自定义
+	// 水平线：用 ─ (U+2500 Box Drawing Light Horizontal) 填满整行
+    hrChar := "─"
+    hrColor := "240" // 灰色
+    style.HorizontalRule.Format = hrChar
+    style.HorizontalRule.Color = &hrColor
+	return glamour.NewTermRenderer(
+		glamour.WithStyles(style),
+		glamour.WithWordWrap(wordWrap),
+	)
+}
+
+// 去掉每行尾部填充空格，返回清理后的字符串和最宽行的宽度
+//
+//	func trimAndMeasure(s string) (string, int) {
+//		lines := strings.Split(s, "\n")
+//		maxW := 0
+//		for i, line := range lines {
+//			w0 := lipgloss.Width(lines[i])
+//			lines[i] = strings.TrimRight(line, " ")
+//			w1 := lipgloss.Width(lines[i])
+//			lines[i] = strings.Map(func(r rune) rune {
+//				if unicode.IsSpace(r) {
+//					return '.' // 如果是空白符，替换
+//				}
+//				return r // 否则保持原样
+//			}, lines[i])
+//			if w := lipgloss.Width(lines[i]); w > maxW {
+//				maxW = w
+//			}
+//			lines[i] += fmt.Sprintf(" [width: %d/%d]", w0, w1)
+//		}
+//		return strings.Join(lines, "\n"), maxW
+//	}
+func trimAndMeasure(s string) (string, int) {
+	lines := strings.Split(s, "\n")
+	maxW := 0
+	for i, line := range lines {
+		// 先 strip ANSI 序列，再去尾部空格，测量真实可见宽度
+		stripped := ansi.Strip(line)
+		trimmed := strings.TrimRight(stripped, " ")
+		visibleW := lipgloss.Width(trimmed)
+
+		// 用 ansi.Truncate 按可见宽度截断原始带颜色的行
+		// 这样保留了 ANSI 颜色，但去掉了尾部填充空格
+		lines[i] = ansi.Truncate(line, visibleW, "")
+
+		if visibleW > maxW {
+			maxW = visibleW
+		}
+	}
+	return strings.Join(lines, "\n"), maxW
+}
+
+func (m *ChatBox) renderBubble(msg *llms.Message, containerWidth int, useMdRender bool) string {
+	bubbleMaxW := containerWidth
+	contentMaxW := bubbleMaxW - 4
+	content := msg.Content
+	actualWidth := 0
+	if useMdRender {
+		r, err := newCustomRenderer(contentMaxW)
+		if err == nil {
+			if mdContent, mdErr := r.Render(content); mdErr == nil {
+				content = strings.Trim(mdContent, "\n")
+				content, actualWidth = trimAndMeasure(content)
+			}
+		}
+		// glamour 渲染失败时 fallback
+		// if actualWidth == 0 {
+		// 	actualWidth = lipgloss.Width(content)
+		// }
+	} else {
+		actualWidth = lipgloss.Width(msg.Content)
+	}
+
+	// 不要再用 wrapStyle 二次换行 glamour 的输出
+	// glamour 已经处理了换行，直接用就行
+	switch msg.Role {
+	case "user":
 		label := userLabelStyle.Render("🧑 User")
-		wrapped := wrapStyle.Render(msg.Content)
-		bubble := userBubbleStyle.Render(wrapped)
+		// 对非 md 内容才需要手动限宽换行
+		if !useMdRender {
+			content = lipgloss.NewStyle().Width(min(contentMaxW, actualWidth)).Render(content)
+		}
+		bubble := userBubbleStyle.Width(min(bubbleMaxW, actualWidth+4)).Render(content)
 		block := lipgloss.JoinVertical(lipgloss.Right, label, bubble)
-		output = lipgloss.NewStyle().Width(containerWidth).Align(lipgloss.Right).Render(block)
-	}
+		return lipgloss.NewStyle().Width(containerWidth).Align(lipgloss.Right).Render(block)
 
-	if msg.Role == "assistant" {
+	case "assistant":
 		label := assistantLabelStyle.Render("🤖 Assistant")
-		wrapped := wrapStyle.Render(msg.Content)
-		bubble := assistantBubbleStyle.Render(wrapped)
+		if !useMdRender {
+			content = lipgloss.NewStyle().Width(min(contentMaxW, actualWidth)).Render(content)
+		}
+		bubble := assistantBubbleStyle.Width(min(bubbleMaxW, actualWidth+4)).Render(content)
 		block := lipgloss.JoinVertical(lipgloss.Left, label, bubble)
-		output = lipgloss.NewStyle().Width(containerWidth).Align(lipgloss.Left).Render(block)
-	}
+		return lipgloss.NewStyle().Width(containerWidth).Align(lipgloss.Left).Render(block)
 
-	if msg.Role == "system" {
-		output = systemBubbleStyle.Width(containerWidth).Render(msg.Content)
+	case "system":
+		return systemBubbleStyle.Width(containerWidth).Render(content)
 	}
-
-	return output
+	return ""
 }

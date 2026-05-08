@@ -11,15 +11,15 @@ var (
 		Bold(true).
 		Foreground(lipgloss.Color("10"))
 
-	viewportStyle = lipgloss.NewStyle().
+	viewBorder = lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color("240")).
 		Padding(0, 1)
 
-	inputboxStyle = lipgloss.NewStyle().
+	inputBorder = lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color("99")).
-		Padding(0, 1)
+		Padding(0, 0)
 
 	userBubbleStyle = lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
